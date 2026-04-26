@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "java-cpp-translator"
+version = "0.1.0"
+description = "Subset Java to C++ translator"
+requires-python = ">=3.10"
+
+dependencies = []
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+addopts = "-q"
