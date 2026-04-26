@@ -108,7 +108,7 @@ public class Cond {
     with pytest.raises(TranslationError) as exc:
         JavaToCppTranslator().translate_text(source, "Cond.java")
     assert exc.value.diagnostic.code == "TypeMismatch"
-    assert "condition must have boolean type" in exc.value.diagnostic.message
+    assert "условие должно иметь тип boolean" in exc.value.diagnostic.message
 
 
 def test_equivalence_class_9_invalid_return_for_void():

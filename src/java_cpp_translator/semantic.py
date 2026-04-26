@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Dict, List, Optional
 
 from .ast import *
@@ -327,7 +328,8 @@ class SemanticAnalyzer:
 
     def _ensure_assignable(self, expected: TypeRef, actual: Optional[TypeRef], line: int, col: int, context: Optional[str]) -> None:
         if actual is None or not self._is_assignable(expected, actual):
-            raise self._error("TypeMismatch", f"cannot assign value of type '{actual.name if actual else 'unknown'}' to '{expected.name}'", line, col, context)
+            actual_name = self._type_name(actual) if actual else "unknown"
+            raise self._error("TypeMismatch", f"cannot assign value of type '{actual_name}' to '{self._type_name(expected)}'", line, col, context)
 
     def _is_assignable(self, expected: TypeRef, actual: TypeRef) -> bool:
         if expected.name == actual.name and expected.dimensions == actual.dimensions:
@@ -364,7 +366,7 @@ class SemanticAnalyzer:
             "TypeMismatch", "UndefinedIdentifier", "UndefinedMember", "UndefinedMethod", "UndefinedType",
         }:
             if not any(ord(ch) > 127 for ch in message):
-                message = ru_message(code, message)
+                message = ru_message(code, self._localize_semantic_detail(message))
         return TranslationError(Stage.SEM, code, message, self.filename, line, column, context)
 
     def _block_returns(self, block: BlockStmt) -> bool:
@@ -412,3 +414,50 @@ class SemanticAnalyzer:
 
     def _is_zero_literal(self, expr: Expr | None) -> bool:
         return isinstance(expr, LiteralExpr) and expr.kind in {"int", "float"} and expr.value in {"0", "0.0"}
+
+    def _type_name(self, type_ref: TypeRef) -> str:
+        return type_ref.name + "[]" * type_ref.dimensions
+
+    def _localize_semantic_detail(self, message: str) -> str:
+        simple = {
+            "condition must have boolean type": "условие должно иметь тип boolean",
+            "void method cannot return a value": "void-метод не должен возвращать значение",
+            "non-void method must return a value": "метод с возвращаемым типом должен возвращать значение",
+            "method arguments are not compatible with any overload": "аргументы метода не соответствуют ни одной перегрузке",
+            "indexing requires an array": "индексация возможна только у массива",
+            "unsupported call target": "неподдерживаемый вызов метода",
+            "finalize is not supported": "метод finalize не поддерживается",
+        }
+        if message in simple:
+            return simple[message]
+        if match := re.fullmatch(r"identifier '(.+)' is not defined", message):
+            return f"идентификатор '{match.group(1)}' не объявлен"
+        if match := re.fullmatch(r"method '(.+)' is not defined", message):
+            return f"метод '{match.group(1)}' не объявлен"
+        if match := re.fullmatch(r"method '(.+)' not found in type '(.+)'", message):
+            return f"метод '{match.group(1)}' не найден в типе '{match.group(2)}'"
+        if match := re.fullmatch(r"member '(.+)' not found in type '(.+)'", message):
+            return f"член '{match.group(1)}' не найден в типе '{match.group(2)}'"
+        if match := re.fullmatch(r"type '(.+)' is not defined", message):
+            return f"тип '{match.group(1)}' не объявлен"
+        if match := re.fullmatch(r"base class '(.+)' is not defined", message):
+            return f"базовый класс '{match.group(1)}' не объявлен"
+        if match := re.fullmatch(r"interface '(.+)' is not defined", message):
+            return f"интерфейс '{match.group(1)}' не объявлен"
+        if match := re.fullmatch(r"operator '(.+)' requires numeric operands", message):
+            return f"оператор '{match.group(1)}' требует числовые операнды"
+        if match := re.fullmatch(r"operator '(.+)' requires boolean operands", message):
+            return f"оператор '{match.group(1)}' требует логические операнды"
+        if match := re.fullmatch(r"operator '(.+)' requires boolean", message):
+            return f"оператор '{match.group(1)}' требует логический операнд"
+        if match := re.fullmatch(r"cannot assign value of type '(.+)' to '(.+)'", message):
+            return f"нельзя присвоить значение типа '{match.group(1)}' переменной типа '{match.group(2)}'"
+        if match := re.fullmatch(r"field '(.+)' already declared", message):
+            return f"поле '{match.group(1)}' уже объявлено"
+        if match := re.fullmatch(r"parameter '(.+)' already declared", message):
+            return f"параметр '{match.group(1)}' уже объявлен"
+        if match := re.fullmatch(r"variable '(.+)' already declared", message):
+            return f"переменная '{match.group(1)}' уже объявлена"
+        if match := re.fullmatch(r"type '(.+)' already declared", message):
+            return f"тип '{match.group(1)}' уже объявлен"
+        return message

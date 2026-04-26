@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import List, Optional
 
 from .ast import *
@@ -410,7 +411,7 @@ class Parser:
     def _error(self, code: str, message: str, token: Token) -> TranslationError:
         if code == "SyntaxError":
             if message != ru_message("MissingCallParentheses"):
-                message = ru_message(code, message)
+                message = ru_message(code, self._localize_syntax_detail(message))
         elif code == "NotSupported":
             message = ru_message(code, message)
         return TranslationError(Stage.SYN, code, message, self.filename, token.line, token.column)
@@ -421,3 +422,39 @@ class Parser:
         if isinstance(expr, MemberAccessExpr):
             return f"{self._member_chain(expr.target)}.{expr.member}"
         return ""
+
+    def _localize_syntax_detail(self, message: str) -> str:
+        simple = {
+            "expected ';'": "ожидался символ ';'",
+            "expected ','": "ожидался символ ','",
+            "expected '{'": "ожидался символ '{'",
+            "expected '}'": "ожидался символ '}'",
+            "expected '('": "ожидался символ '('",
+            "expected ')'": "ожидался символ ')'",
+            "expected while": "ожидалось ключевое слово while",
+            "expected ')' after for clauses": "ожидался символ ')' после заголовка for",
+            "expected ';' after import": "ожидался символ ';' после import",
+            "expected ';' after package": "ожидался символ ';' после package",
+            "expected member name": "ожидалось имя члена класса",
+            "expected variable name": "ожидалось имя переменной",
+            "expected parameter name": "ожидалось имя параметра",
+            "expected class name": "ожидалось имя класса",
+            "expected interface name": "ожидалось имя интерфейса",
+            "expected method name": "ожидалось имя метода",
+            "expected base class name": "ожидалось имя базового класса",
+            "expected interface name": "ожидалось имя интерфейса",
+            "expected qualified name": "ожидалось полное имя",
+            "expected qualified name part": "ожидалась следующая часть полного имени",
+            "expected constructor call or array allocation after new": "после new ожидался вызов конструктора или создание массива",
+            "expected ',' in array initializer": "в инициализаторе массива ожидался символ ','",
+            "expected ']' after '['": "ожидался символ ']'",
+        }
+        if message in simple:
+            return simple[message]
+        if match := re.fullmatch(r"expected class or interface, got '(.+)'", message):
+            return f"ожидалось объявление class или interface, найдено '{match.group(1)}'"
+        if match := re.fullmatch(r"expected type, got '(.+)'", message):
+            return f"ожидался тип, найдено '{match.group(1)}'"
+        if match := re.fullmatch(r"unexpected token '(.+)'", message):
+            return f"неожиданный токен '{match.group(1)}'"
+        return message
