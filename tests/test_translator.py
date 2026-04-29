@@ -61,7 +61,7 @@ public class Counter {
     generated = translate_ok(source, "Counter.java")
     assert "for (int i = 0; (i < n); (i = (i + 1)))" in generated.source_code
     assert "std::vector<int> make(int n);" in generated.header_code
-    assert "std::vector<int>(n)" in generated.source_code
+    assert "std::vector<int> arr(n);" in generated.source_code
 
 
 def test_equivalence_class_6_undefined_identifier_semantic_error():
@@ -209,7 +209,7 @@ def test_report_requirements_russian_diagnostics_and_input_validation(tmp_path: 
 
     assert exc.value.diagnostic.code == "InvalidInputExtension"
     assert "входной файл должен иметь расширение .java" in exc.value.diagnostic.message
-    assert "Ошибка" in exc.value.diagnostic.format_ru()
+    assert " LEX Error InvalidInputExtension: " in exc.value.diagnostic.format_ru()
 
 
 def test_report_requirements_console_scanner_imports_postfix_and_array_literal():

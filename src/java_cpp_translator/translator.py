@@ -23,7 +23,8 @@ class JavaToCppTranslator:
             stem = base_name or Path(filename).stem
             return CppGenerator(filename).generate(unit, stem)
         except TranslationError as exc:
-            self.diagnostics.add(exc.diagnostic)
+            diagnostics = getattr(exc, "diagnostics", [exc.diagnostic])
+            self.diagnostics.extend(diagnostics)
             raise
 
     def translate_file(self, path: str | Path, output_dir: str | Path) -> Dict[str, str]:
@@ -51,6 +52,8 @@ class JavaToCppTranslator:
         if len(name) > 255:
             raise self._validation_error("FileNameTooLong", name)
         if any(ch in name for ch in '/:*?"<>|'):
+            raise self._validation_error("InvalidFileName", name)
+        if any(ch.isspace() for ch in name):
             raise self._validation_error("InvalidFileName", name)
 
     def _validate_text(self, text: str, filename: str) -> None:

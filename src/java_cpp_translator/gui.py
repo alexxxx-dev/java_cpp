@@ -41,6 +41,7 @@ class TranslatorGui:
         ttk.Label(main, text="Диагностика и результат").grid(row=5, column=0, columnspan=3, sticky="w")
         self.log_text = tk.Text(main, wrap="word", height=10)
         self.log_text.grid(row=6, column=0, columnspan=3, sticky="nsew", pady=(4, 8))
+        self._add_copy_bindings(self.log_text)
 
         status = ttk.Label(main, textvariable=self.status_var, anchor="w")
         status.grid(row=7, column=0, columnspan=3, sticky="ew")
@@ -102,6 +103,23 @@ class TranslatorGui:
             self.status_var.set("Трансляция завершена.")
         else:
             self.status_var.set("Трансляция завершена с ошибками.")
+
+    def _add_copy_bindings(self, widget: tk.Text) -> None:
+        menu = tk.Menu(widget, tearoff=False)
+        menu.add_command(label="Копировать", command=lambda: widget.event_generate("<<Copy>>"))
+        menu.add_command(label="Выделить всё", command=lambda: self._select_all(widget))
+        widget.bind("<Control-a>", lambda event: self._select_all(widget))
+        widget.bind("<Button-3>", lambda event: self._show_context_menu(menu, event))
+
+    def _select_all(self, widget: tk.Text) -> str:
+        widget.tag_add("sel", "1.0", "end-1c")
+        widget.mark_set("insert", "1.0")
+        widget.see("insert")
+        return "break"
+
+    def _show_context_menu(self, menu: tk.Menu, event: tk.Event) -> str:
+        menu.tk_popup(event.x_root, event.y_root)
+        return "break"
 
 
 def main() -> None:

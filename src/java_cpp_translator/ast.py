@@ -20,6 +20,7 @@ class Node:
 @dataclass(slots=True)
 class CompilationUnit(Node):
     declarations: List["TypeDecl"] = field(default_factory=list)
+    imports: List[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

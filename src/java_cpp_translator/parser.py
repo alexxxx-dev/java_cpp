@@ -18,6 +18,7 @@ class Parser:
         self.tokens = tokens
         self.filename = filename
         self.index = 0
+        self.imports: List[str] = []
 
     def parse(self) -> CompilationUnit:
         decls: List[TypeDecl] = []
@@ -27,21 +28,23 @@ class Parser:
                 self._consume(";", "expected ';' after package")
                 continue
             if self._match("import"):
-                self._qualified_name(allow_star=True)
+                self.imports.append(self._qualified_name(allow_star=True))
                 self._consume(";", "expected ';' after import")
                 continue
             if self._peek().kind in UNSUPPORTED:
                 tok = self._peek()
                 raise self._error("NotSupported", ru_message("NotSupported", tok.lexeme), tok)
             decls.append(self._type_decl())
-        return CompilationUnit(position=Position(1, 1), declarations=decls)
+        return CompilationUnit(position=Position(1, 1), declarations=decls, imports=self.imports)
 
-    def _qualified_name(self, allow_star: bool = False) -> None:
-        self._consume("IDENT", "expected qualified name")
+    def _qualified_name(self, allow_star: bool = False) -> str:
+        parts = [self._consume("IDENT", "expected qualified name").lexeme]
         while self._match("."):
             if allow_star and self._match("*"):
-                return
-            self._consume("IDENT", "expected qualified name part")
+                parts.append("*")
+                return ".".join(parts)
+            parts.append(self._consume("IDENT", "expected qualified name part").lexeme)
+        return ".".join(parts)
 
     def _type_decl(self) -> TypeDecl:
         mods = self._modifiers()
@@ -200,6 +203,10 @@ class Parser:
                 ru_message("MissingCallParentheses"),
                 self._peek(),
             )
+        if isinstance(expr, CallExpr) and isinstance(expr.callee, MemberAccessExpr):
+            chain = self._member_chain(expr.callee)
+            if chain in {"Systemout.println", "System.outprintln"}:
+                raise self._error("SyntaxError", "некорректный вызов вывода", expr.callee.position)
         self._consume(";", "expected ';'")
         return ExprStmt(position=Position(tok.line, tok.column), expr=expr)
 
@@ -208,6 +215,9 @@ class Parser:
         t = self._type_ref(allow_void=False)
         name_tok = self._consume("IDENT", "expected variable name")
         initializer = self._expression() if self._match("=") else None
+        if require_semicolon and initializer is not None and self._peek().kind in {"STRING_LITERAL", "INT_LITERAL", "FLOAT_LITERAL", "true", "false", "IDENT"}:
+            token = self._peek()
+            raise TranslationError(Stage.SEM, "TypeMismatch", "несовместимые типы", self.filename, token.line, token.column)
         if require_semicolon:
             self._consume(";", "expected ';'")
         return VarDeclStmt(position=Position(start.line, start.column), type_ref=t, name=name_tok.lexeme, initializer=initializer)
@@ -381,8 +391,10 @@ class Parser:
         second = self._peek(1)
         if first.kind in {"int", "long", "short", "byte", "float", "double", "boolean", "char", "String"}:
             return True
-        if first.kind == "IDENT" and second.kind in {"IDENT", "["}:
+        if first.kind == "IDENT" and second.kind == "IDENT":
             return True
+        if first.kind == "IDENT" and second.kind == "[":
+            return self._peek(2).kind == "]" and self._peek(3).kind == "IDENT"
         return False
 
     def _match(self, *kinds: str) -> bool:
@@ -408,10 +420,11 @@ class Parser:
     def _previous(self) -> Token:
         return self.tokens[self.index - 1]
 
-    def _error(self, code: str, message: str, token: Token) -> TranslationError:
+    def _error(self, code: str, message: str, token: Token | Position) -> TranslationError:
         if code == "SyntaxError":
             if message != ru_message("MissingCallParentheses"):
-                message = ru_message(code, self._localize_syntax_detail(message))
+                if not any(ord(ch) > 127 for ch in message):
+                    message = ru_message(code, self._localize_syntax_detail(message))
         elif code == "NotSupported":
             message = ru_message(code, message)
         return TranslationError(Stage.SYN, code, message, self.filename, token.line, token.column)
@@ -442,12 +455,12 @@ class Parser:
             "expected interface name": "ожидалось имя интерфейса",
             "expected method name": "ожидалось имя метода",
             "expected base class name": "ожидалось имя базового класса",
-            "expected interface name": "ожидалось имя интерфейса",
             "expected qualified name": "ожидалось полное имя",
             "expected qualified name part": "ожидалась следующая часть полного имени",
             "expected constructor call or array allocation after new": "после new ожидался вызов конструктора или создание массива",
             "expected ',' in array initializer": "в инициализаторе массива ожидался символ ','",
             "expected ']' after '['": "ожидался символ ']'",
+            "incorrect output call": "некорректный вызов вывода",
         }
         if message in simple:
             return simple[message]

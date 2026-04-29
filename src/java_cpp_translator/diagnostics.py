@@ -30,27 +30,19 @@ class Diagnostic:
     context: Optional[str] = None
 
     def format(self) -> str:
-        ctx = f" [{self.context}]" if self.context else ""
+        message = self._message_with_period()
         return (
             f"{self.filename}:{self.position.line}:{self.position.column} "
-            f"{self.stage.value} {self.level} {self.code}: {self.message}{ctx}"
+            f"{self.stage.value} {self.level} {self.code}: {message}"
         )
 
     def format_ru(self) -> str:
-        ctx = f" [контекст: {self.context}]" if self.context else ""
-        stage_names = {
-            Stage.LEX: "лексический анализ",
-            Stage.SYN: "синтаксический анализ",
-            Stage.SEM: "семантический анализ",
-            Stage.TR: "трансляция",
-            Stage.GEN: "генерация C++",
-        }
-        level = "Ошибка" if self.level == "Error" else "Предупреждение"
-        return (
-            f"{self.filename}:{self.position.line}:{self.position.column} "
-            f"{self.stage.value} {level} {self.code}: {self.message}{ctx} "
-            f"({stage_names.get(self.stage, self.stage.value)})"
-        )
+        return self.format()
+
+    def _message_with_period(self) -> str:
+        if self.message.endswith((".", "!", "?")):
+            return self.message
+        return f"{self.message}."
 
 
 RU_MESSAGES = {
@@ -64,6 +56,7 @@ RU_MESSAGES = {
     "InvalidFileName": "имя входного файла содержит недопустимые символы",
     "InvalidInputExtension": "входной файл должен иметь расширение .java",
     "InvalidReturn": "оператор return не соответствует типу метода",
+    "ArrayIndexOutOfBounds": "индекс массива выходит за допустимые границы",
     "MethodSignatureMismatch": "аргументы метода не подходят ни к одной сигнатуре",
     "MissingCallParentheses": "отсутствуют круглые скобки при вызове метода",
     "MissingReturn": "не все пути выполнения возвращают значение",
@@ -71,6 +64,7 @@ RU_MESSAGES = {
     "NotSupportedFinalize": "метод finalize не поддерживается",
     "OutputDirectory": "не удалось подготовить каталог вывода",
     "SourceTooLarge": "исходный файл не должен превышать 10 000 строк",
+    "ScannerNotClosed": "объект Scanner должен быть закрыт методом close",
     "SyntaxError": "синтаксическая ошибка",
     "TypeMismatch": "несовместимые типы",
     "UndefinedIdentifier": "идентификатор не объявлен",
@@ -110,6 +104,16 @@ class TranslationError(Exception):
             position=Position(line, column),
             context=context,
         )
+
+
+class TranslationErrors(TranslationError):
+    def __init__(self, diagnostics: List[Diagnostic]) -> None:
+        if not diagnostics:
+            raise ValueError("diagnostics must not be empty")
+        first = diagnostics[0]
+        Exception.__init__(self, first.message)
+        self.diagnostic = first
+        self.diagnostics = diagnostics
 
 
 class DiagnosticBag:

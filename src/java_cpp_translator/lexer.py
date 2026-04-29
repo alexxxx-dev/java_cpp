@@ -15,7 +15,7 @@ KEYWORDS = {
     "null", "true", "false",
 }
 
-TWO_CHAR = {"++", "--", "+=", "-=", "==", "!=", "<=", ">=", "&&", "||"}
+TWO_CHAR = {"++", "--", "+=", "-=", "*=", "/=", "%=", "==", "!=", "<=", ">=", "&&", "||"}
 ONE_CHAR = set("=+-*/%<>!.,;:(){}[]")
 
 
@@ -52,6 +52,8 @@ class Lexer:
             if ch == "/" and self._peek(1) == "*":
                 self._advance(); self._advance()
                 while not self._eof() and not (self._peek() == "*" and self._peek(1) == "/"):
+                    if self._peek() == "/" and self._peek(1) == "*":
+                        raise TranslationError(Stage.LEX, "UnterminatedComment", "вложенные комментарии не поддерживаются", self.filename, self.line, self.column)
                     if self._peek() == "\n":
                         self._advance_line()
                     else:
@@ -60,6 +62,8 @@ class Lexer:
                     raise TranslationError(Stage.LEX, "UnterminatedComment", ru_message("UnterminatedComment"), self.filename, self.line, self.column)
                 self._advance(); self._advance()
                 continue
+            if ch == "*" and self._peek(1) == "/":
+                raise TranslationError(Stage.LEX, "InvalidCharacter", "закрывающий комментарий найден без открывающего", self.filename, self.line, self.column)
             if ch.isalpha() or ch in "_$":
                 tokens.append(self._identifier())
                 continue

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Set
+from typing import Dict, List, Optional, Set
 
 from .ast import *
 from .diagnostics import Stage, TranslationError
@@ -20,6 +20,8 @@ class CppGenerator:
         self.filename = filename
         self.current_class: Optional[str] = None
         self.includes: Set[str] = set()
+        self.param_aliases: Dict[str, str] = {}
+        self.field_names: Set[str] = set()
 
     def generate(self, unit: CompilationUnit, base_name: str) -> GeneratedFile:
         classes = [d for d in unit.declarations if isinstance(d, ClassDecl)]
@@ -56,10 +58,10 @@ class CppGenerator:
             source_includes.append("#include <string>")
         if "cstdint" in self.includes:
             source_includes.append("#include <cstdint>")
-        if "iostream" in self.includes:
+        if "iostream" in self.includes or "header_iostream" in self.includes:
             source_includes.append("#include <iostream>")
         if source_includes:
-            source_header.extend(sorted(set(source_includes)))
+            source_header.extend(source_includes)
         if source_lines:
             source_header.append("")
         source_header.extend(source_lines)
@@ -69,15 +71,15 @@ class CppGenerator:
         includes = []
         if "string" in self.includes:
             includes.append("#include <string>")
-        if "cstdint" in self.includes:
-            includes.append("#include <cstdint>")
-        if "iostream" in self.includes:
-            includes.append("#include <iostream>")
         if "memory" in self.includes:
             includes.append("#include <memory>")
         if "vector" in self.includes:
             includes.append("#include <vector>")
-        return sorted(includes)
+        if "cstdint" in self.includes:
+            includes.append("#include <cstdint>")
+        if "header_iostream" in self.includes:
+            includes.append("#include <iostream>")
+        return includes
 
     def _emit_interface_decl(self, decl: InterfaceDecl) -> List[str]:
         lines = [f"class {decl.name}", "{", "public:", f"    virtual ~{decl.name}() = default;"]
@@ -100,7 +102,7 @@ class CppGenerator:
             if isinstance(member, FieldDecl):
                 lines.append(f"    {self._cpp_type(member.type_ref)} {member.name};")
             elif isinstance(member, ConstructorDecl):
-                params = ", ".join(f"{self._cpp_type(p.type_ref)} {p.name}" for p in member.parameters)
+                params = ", ".join(f"{self._cpp_type(p.type_ref)} {self._cpp_param_name(p, decl)}" for p in member.parameters)
                 lines.append(f"    {decl.name}({params});")
             elif isinstance(member, MethodDecl):
                 params = ", ".join(f"{self._cpp_type(p.type_ref)} {p.name}" for p in member.parameters)
@@ -111,16 +113,20 @@ class CppGenerator:
 
     def _emit_class_defs(self, decl: ClassDecl) -> List[str]:
         self.current_class = decl.name
+        self.field_names = {member.name for member in decl.members if isinstance(member, FieldDecl)}
         lines: List[str] = []
         for member in decl.members:
             if isinstance(member, ConstructorDecl):
-                params = ", ".join(f"{self._cpp_type(p.type_ref)} {p.name}" for p in member.parameters)
+                self.param_aliases = {p.name: self._cpp_param_name(p, decl) for p in member.parameters}
+                params = ", ".join(f"{self._cpp_type(p.type_ref)} {self.param_aliases[p.name]}" for p in member.parameters)
                 lines.append(f"{decl.name}::{decl.name}({params})")
                 lines.extend(self._emit_block(member.body))
                 lines.append("")
+                self.param_aliases = {}
             elif isinstance(member, MethodDecl):
                 if member.body is None:
                     continue
+                self.param_aliases = {}
                 params = ", ".join(f"{self._cpp_type(p.type_ref)} {p.name}" for p in member.parameters)
                 lines.append(f"{self._cpp_type(member.return_type)} {decl.name}::{member.name}({params})")
                 lines.extend(self._emit_block(member.body))
@@ -140,10 +146,15 @@ class CppGenerator:
         if isinstance(stmt, BlockStmt):
             return self._emit_block(stmt, indent)
         if isinstance(stmt, VarDeclStmt):
+            if isinstance(stmt.initializer, NewExpr) and stmt.initializer.array_size is not None:
+                return [f"{pad}{self._cpp_type(stmt.type_ref)} {stmt.name}({self._emit_expr(stmt.initializer.array_size)});"]
             init = f" = {self._emit_expr(stmt.initializer)}" if stmt.initializer else ""
             return [f"{pad}{self._cpp_type(stmt.type_ref)} {stmt.name}{init};"]
         if isinstance(stmt, ExprStmt):
-            return [f"{pad}{self._emit_expr(stmt.expr)};"]
+            expr = self._emit_expr(stmt.expr)
+            if isinstance(stmt.expr, AssignExpr) and expr.startswith("(") and expr.endswith(")"):
+                expr = expr[1:-1]
+            return [f"{pad}{expr};"]
         if isinstance(stmt, IfStmt):
             lines = [f"{pad}if ({self._emit_expr(stmt.condition)})"]
             lines.extend(self._emit_stmt(stmt.then_branch, indent))
@@ -190,7 +201,9 @@ class CppGenerator:
                 return "nullptr"
             return expr.value
         if isinstance(expr, NameExpr):
-            return expr.name
+            if expr.name in self.field_names and expr.name not in self.param_aliases:
+                return f"this->{expr.name}"
+            return self.param_aliases.get(expr.name, expr.name)
         if isinstance(expr, ThisExpr):
             return "this"
         if isinstance(expr, UnaryExpr):
@@ -215,9 +228,9 @@ class CppGenerator:
                 if chain == "System.out.println":
                     self.includes.add("iostream")
                     if not expr.arguments:
-                        return "std::cout << std::endl"
+                        return "std::cout"
                     args = " << ".join(self._emit_expr(arg) for arg in expr.arguments)
-                    return f"std::cout << {args} << std::endl"
+                    return f"std::cout << {args}"
                 if expr.callee.member in {"nextInt", "nextLine", "nextDouble"}:
                     self.includes.add("iostream")
                     if expr.callee.member == "nextLine":
@@ -274,6 +287,7 @@ class CppGenerator:
             return "std::int8_t"
         if type_ref.name == "Scanner":
             self.includes.add("iostream")
+            self.includes.add("header_iostream")
             return "std::istream*"
         if type_ref.name in mapping:
             return mapping[type_ref.name]
@@ -291,3 +305,9 @@ class CppGenerator:
         if isinstance(expr, MemberAccessExpr):
             return f"{self._member_chain(expr.target)}.{expr.member}"
         return ""
+
+    def _cpp_param_name(self, parameter: Parameter, decl: ClassDecl) -> str:
+        field_names = {member.name for member in decl.members if isinstance(member, FieldDecl)}
+        if parameter.name in field_names:
+            return f"{parameter.name}_"
+        return parameter.name

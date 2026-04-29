@@ -5,7 +5,7 @@ import re
 from typing import Dict, List, Optional
 
 from .ast import *
-from .diagnostics import Stage, TranslationError, ru_message
+from .diagnostics import Diagnostic, Stage, TranslationError, TranslationErrors, ru_message
 
 
 PRIMITIVES = {"int", "long", "short", "byte", "float", "double", "boolean", "char", "void"}
@@ -17,6 +17,7 @@ class MethodSig:
     return_type: TypeRef
     parameters: List[TypeRef]
     is_static: bool = False
+    is_private: bool = False
 
 
 @dataclass
@@ -27,12 +28,15 @@ class ClassInfo:
     methods: Dict[str, List[MethodSig]]
     extends: Optional[str] = None
     implements: List[str] = None
+    final_fields: set[str] = None
 
 
 class Scope:
     def __init__(self, parent: Optional["Scope"] = None) -> None:
         self.parent = parent
         self.symbols: Dict[str, TypeRef] = {}
+        self.array_lengths: Dict[str, int] = {}
+        self.final_symbols: set[str] = set()
 
     def define(self, name: str, type_ref: TypeRef) -> bool:
         if name in self.symbols:
@@ -47,6 +51,22 @@ class Scope:
             return self.parent.lookup(name)
         return None
 
+    def define_array_length(self, name: str, length: int) -> None:
+        self.array_lengths[name] = length
+
+    def lookup_array_length(self, name: str) -> Optional[int]:
+        if name in self.array_lengths:
+            return self.array_lengths[name]
+        if self.parent:
+            return self.parent.lookup_array_length(name)
+        return None
+
+    def define_final(self, name: str) -> None:
+        self.final_symbols.add(name)
+
+    def is_final(self, name: str) -> bool:
+        return name in self.final_symbols or bool(self.parent and self.parent.is_final(name))
+
 
 class SemanticAnalyzer:
     def __init__(self, filename: str) -> None:
@@ -54,6 +74,9 @@ class SemanticAnalyzer:
         self.classes: Dict[str, ClassInfo] = {}
         self.current_class: Optional[ClassInfo] = None
         self.current_method: Optional[MethodSig] = None
+        self.diagnostics: List[Diagnostic] = []
+        self.current_scanners: Dict[str, Position] = {}
+        self.closed_scanners: set[str] = set()
 
     def analyze(self, unit: CompilationUnit) -> CompilationUnit:
         self.classes["Scanner"] = ClassInfo(
@@ -68,35 +91,41 @@ class SemanticAnalyzer:
             },
             None,
             [],
+            set(),
         )
+        self._check_imports(unit)
         self._collect_types(unit)
         for decl in unit.declarations:
-            if isinstance(decl, ClassDecl):
-                self._analyze_class(decl)
-            else:
-                self._analyze_interface(decl)
+            self._try(lambda decl=decl: self._analyze_class(decl) if isinstance(decl, ClassDecl) else self._analyze_interface(decl))
+        if self.diagnostics:
+            raise TranslationErrors(self.diagnostics)
         return unit
 
     def _collect_types(self, unit: CompilationUnit) -> None:
         for decl in unit.declarations:
             if decl.name in self.classes:
-                raise self._error("DuplicateType", f"type '{decl.name}' already declared", decl.position.line, decl.position.column, decl.name)
+                self._report(self._error("DuplicateType", f"type '{decl.name}' already declared", decl.position.line, decl.position.column, decl.name))
+                continue
             if isinstance(decl, ClassDecl):
                 fields: Dict[str, TypeRef] = {}
                 methods: Dict[str, List[MethodSig]] = {}
+                final_fields: set[str] = set()
                 for member in decl.members:
                     if isinstance(member, FieldDecl):
                         if member.name in fields:
-                            raise self._error("DuplicateField", f"field '{member.name}' already declared", member.position.line, member.position.column, decl.name)
+                            self._report(self._error("DuplicateField", f"field '{member.name}' already declared", member.position.line, member.position.column, decl.name))
+                            continue
                         fields[member.name] = member.type_ref
+                        if "final" in member.modifiers:
+                            final_fields.add(member.name)
                     elif isinstance(member, MethodDecl):
-                        methods.setdefault(member.name, []).append(MethodSig(member.return_type, [p.type_ref for p in member.parameters], "static" in member.modifiers))
+                        methods.setdefault(member.name, []).append(MethodSig(member.return_type, [p.type_ref for p in member.parameters], "static" in member.modifiers, "private" in member.modifiers))
                     elif isinstance(member, ConstructorDecl):
-                        methods.setdefault(decl.name, []).append(MethodSig(TypeRef("void"), [p.type_ref for p in member.parameters], False))
-                self.classes[decl.name] = ClassInfo(decl.name, "class", fields, methods, decl.extends, decl.implements)
+                        methods.setdefault(decl.name, []).append(MethodSig(TypeRef("void"), [p.type_ref for p in member.parameters], False, False))
+                self.classes[decl.name] = ClassInfo(decl.name, "class", fields, methods, decl.extends, decl.implements, final_fields)
             else:
-                methods = {m.name: [MethodSig(m.return_type, [p.type_ref for p in m.parameters], False)] for m in decl.members}
-                self.classes[decl.name] = ClassInfo(decl.name, "interface", {}, methods, None, [])
+                methods = {m.name: [MethodSig(m.return_type, [p.type_ref for p in m.parameters], False, False)] for m in decl.members}
+                self.classes[decl.name] = ClassInfo(decl.name, "interface", {}, methods, None, [], set())
 
     def _analyze_interface(self, decl: InterfaceDecl) -> None:
         return
@@ -104,51 +133,74 @@ class SemanticAnalyzer:
     def _analyze_class(self, decl: ClassDecl) -> None:
         self.current_class = self.classes[decl.name]
         if decl.extends and decl.extends not in self.classes:
-            raise self._error("UndefinedType", f"base class '{decl.extends}' is not defined", decl.position.line, decl.position.column, decl.name)
+            self._report(self._error("UndefinedType", f"base class '{decl.extends}' is not defined", decl.position.line, decl.position.column, decl.name))
+        elif decl.extends and self.classes[decl.extends].kind == "interface":
+            self._report(self._error("TypeMismatch", "интерфейс нельзя использовать в extends как класс", decl.position.line, decl.position.column, decl.name))
         for interface in decl.implements:
             if interface not in self.classes:
-                raise self._error("UndefinedType", f"interface '{interface}' is not defined", decl.position.line, decl.position.column, decl.name)
+                self._report(self._error("UndefinedType", f"interface '{interface}' is not defined", decl.position.line, decl.position.column, decl.name))
+            elif self.classes[interface].kind == "interface":
+                self._check_interface_implementation(decl, self.classes[interface])
         for member in decl.members:
-            if isinstance(member, FieldDecl) and member.initializer:
-                scope = Scope()
-                self._check_expr(member.initializer, scope)
-                self._ensure_assignable(member.type_ref, member.initializer.inferred_type, member.position.line, member.position.column, decl.name)
-            elif isinstance(member, ConstructorDecl):
-                self.current_method = MethodSig(TypeRef("void"), [p.type_ref for p in member.parameters], False)
-                class_scope = Scope()
-                for field_name, field_type in self.current_class.fields.items():
-                    class_scope.define(field_name, field_type)
-                scope = Scope(class_scope)
-                for p in member.parameters:
-                    if not scope.define(p.name, p.type_ref):
-                        raise self._error("DuplicateParameter", f"parameter '{p.name}' already declared", p.position.line, p.position.column, decl.name)
-                self._check_stmt(member.body, scope)
-            elif isinstance(member, MethodDecl) and member.body is not None:
-                self.current_method = MethodSig(member.return_type, [p.type_ref for p in member.parameters], "static" in member.modifiers)
-                class_scope = Scope()
-                for field_name, field_type in self.current_class.fields.items():
-                    class_scope.define(field_name, field_type)
-                scope = Scope(class_scope)
-                for p in member.parameters:
-                    if not scope.define(p.name, p.type_ref):
-                        raise self._error("DuplicateParameter", f"parameter '{p.name}' already declared", p.position.line, p.position.column, decl.name)
-                self._check_stmt(member.body, scope)
-                if member.return_type.name != "void" and not self._block_returns(member.body):
-                    raise self._error("MissingReturn", ru_message("MissingReturn"), member.position.line, member.position.column, decl.name)
-                self._validate_main(member, decl)
+            self._try(lambda member=member: self._analyze_member(member, decl))
+
+    def _analyze_member(self, member: object, decl: ClassDecl) -> None:
+        if isinstance(member, FieldDecl) and member.initializer:
+            scope = Scope()
+            self._check_expr(member.initializer, scope)
+            self._ensure_assignable(member.type_ref, member.initializer.inferred_type, member.position.line, member.position.column, decl.name)
+        elif isinstance(member, ConstructorDecl):
+            self.current_method = MethodSig(TypeRef("void"), [p.type_ref for p in member.parameters], False)
+            self.current_scanners = {}
+            self.closed_scanners = set()
+            scope = self._member_scope()
+            for p in member.parameters:
+                if not scope.define(p.name, p.type_ref):
+                    self._report(self._error("DuplicateParameter", f"parameter '{p.name}' already declared", p.position.line, p.position.column, decl.name))
+            self._check_stmt(member.body, scope)
+            self._check_scanners_closed()
+        elif isinstance(member, MethodDecl) and member.body is not None:
+            self.current_method = MethodSig(member.return_type, [p.type_ref for p in member.parameters], "static" in member.modifiers, "private" in member.modifiers)
+            self.current_scanners = {}
+            self.closed_scanners = set()
+            scope = self._member_scope()
+            for p in member.parameters:
+                if not scope.define(p.name, p.type_ref):
+                    self._report(self._error("DuplicateParameter", f"parameter '{p.name}' already declared", p.position.line, p.position.column, decl.name))
+            self._check_stmt(member.body, scope)
+            self._check_scanners_closed()
+            if member.return_type.name != "void" and not self._block_returns(member.body):
+                self._report(self._error("MissingReturn", ru_message("MissingReturn"), member.position.line, member.position.column, decl.name))
+            self._validate_main(member, decl)
+
+    def _member_scope(self) -> Scope:
+        class_scope = Scope()
+        if self.current_class:
+            for field_name, field_type in self.current_class.fields.items():
+                class_scope.define(field_name, field_type)
+                if self.current_class.final_fields and field_name in self.current_class.final_fields:
+                    class_scope.define_final(field_name)
+        return Scope(class_scope)
 
     def _check_stmt(self, stmt: Stmt, scope: Scope) -> None:
         if isinstance(stmt, BlockStmt):
             block_scope = Scope(scope)
             for s in stmt.statements:
-                self._check_stmt(s, block_scope)
+                self._try(lambda s=s: self._check_stmt(s, block_scope))
             return
         if isinstance(stmt, VarDeclStmt):
             if not scope.define(stmt.name, stmt.type_ref):
                 raise self._error("DuplicateVariable", f"variable '{stmt.name}' already declared", stmt.position.line, stmt.position.column, self.current_class.name if self.current_class else None)
+            if stmt.type_ref.name == "Scanner":
+                self.current_scanners[stmt.name] = stmt.position
+            if "final" in getattr(stmt, "modifiers", []):
+                scope.define_final(stmt.name)
             if stmt.initializer:
                 self._check_expr(stmt.initializer, scope)
                 self._ensure_assignable(stmt.type_ref, stmt.initializer.inferred_type, stmt.position.line, stmt.position.column, self.current_class.name if self.current_class else None)
+                length = self._array_length_from_initializer(stmt.initializer)
+                if length is not None:
+                    scope.define_array_length(stmt.name, length)
             return
         if isinstance(stmt, ExprStmt):
             self._check_expr(stmt.expr, scope); return
@@ -238,6 +290,7 @@ class SemanticAnalyzer:
                 expr.inferred_type = TypeRef("boolean")
             return expr.inferred_type
         if isinstance(expr, AssignExpr):
+            self._check_final_assignment(expr.target, scope, expr.position.line, expr.position.column)
             target_t = self._check_expr(expr.target, scope)
             value_t = self._check_expr(expr.value, scope)
             self._ensure_assignable(target_t, value_t, expr.position.line, expr.position.column, self.current_class.name if self.current_class else None)
@@ -265,15 +318,24 @@ class SemanticAnalyzer:
                 expr.inferred_type = TypeRef("void")
                 return expr.inferred_type
             if isinstance(expr.callee, MemberAccessExpr):
+                if expr.callee.member == "close" and isinstance(expr.callee.target, NameExpr):
+                    self.closed_scanners.add(expr.callee.target.name)
                 target_t = self._check_expr(expr.callee.target, scope)
                 info = self.classes.get(target_t.name)
                 if not info or expr.callee.member not in info.methods:
                     raise self._error("UndefinedMethod", f"method '{expr.callee.member}' not found in type '{target_t.name}'", expr.position.line, expr.position.column, self.current_class.name if self.current_class else None)
                 candidates = info.methods[expr.callee.member]
+                if target_t.name != (self.current_class.name if self.current_class else None) and any(candidate.is_private for candidate in candidates):
+                    raise self._error("UndefinedMember", "private-метод недоступен из другого класса", expr.position.line, expr.position.column, self.current_class.name if self.current_class else None)
             elif isinstance(expr.callee, NameExpr):
+                callee_type = scope.lookup(expr.callee.name)
+                if callee_type and callee_type.dimensions > 0:
+                    raise TranslationError(Stage.SYN, "SyntaxError", "для обращения к массиву должны использоваться квадратные скобки", self.filename, expr.position.line, expr.position.column, self.current_class.name if self.current_class else None)
                 if not self.current_class or expr.callee.name not in self.current_class.methods:
                     raise self._error("UndefinedMethod", f"method '{expr.callee.name}' is not defined", expr.position.line, expr.position.column, self.current_class.name if self.current_class else None)
                 candidates = self.current_class.methods[expr.callee.name]
+                if self.current_method and self.current_method.is_static and any(not candidate.is_static for candidate in candidates):
+                    raise self._error("TypeMismatch", "нестатический метод нельзя вызывать из статического контекста", expr.position.line, expr.position.column, self.current_class.name if self.current_class else None)
             else:
                 raise self._error("NotSupported", "unsupported call target", expr.position.line, expr.position.column, self.current_class.name if self.current_class else None)
             arg_types = [self._check_expr(arg, scope) for arg in expr.arguments]
@@ -308,6 +370,7 @@ class SemanticAnalyzer:
             self._check_expr(expr.index, scope)
             if target_t.dimensions < 1:
                 raise self._error("TypeMismatch", "indexing requires an array", expr.position.line, expr.position.column, self.current_class.name if self.current_class else None)
+            self._check_array_bounds(expr, scope)
             expr.inferred_type = TypeRef(target_t.name, target_t.dimensions - 1)
             return expr.inferred_type
         if isinstance(expr, ArrayLiteralExpr):
@@ -364,6 +427,7 @@ class SemanticAnalyzer:
             "DuplicateField", "DuplicateParameter", "DuplicateType", "DuplicateVariable",
             "InvalidReturn", "MethodSignatureMismatch", "NotSupported", "NotSupportedFinalize",
             "TypeMismatch", "UndefinedIdentifier", "UndefinedMember", "UndefinedMethod", "UndefinedType",
+            "ScannerNotClosed", "ArrayIndexOutOfBounds",
         }:
             if not any(ord(ch) > 127 for ch in message):
                 message = ru_message(code, self._localize_semantic_detail(message))
@@ -400,7 +464,7 @@ class SemanticAnalyzer:
             and member.parameters[0].type_ref.dimensions == 1
         )
         if not is_valid:
-            raise self._error("SyntaxError", ru_message("SyntaxError", "main должен иметь сигнатуру public static void main(String[] args)"), member.position.line, member.position.column, decl.name)
+            raise TranslationError(Stage.SYN, "SyntaxError", "main должен иметь сигнатуру public static void main(String[] args)", self.filename, member.position.line, member.position.column, decl.name)
 
     def _member_chain(self, expr: Expr) -> str:
         if isinstance(expr, NameExpr):
@@ -427,6 +491,14 @@ class SemanticAnalyzer:
             "indexing requires an array": "индексация возможна только у массива",
             "unsupported call target": "неподдерживаемый вызов метода",
             "finalize is not supported": "метод finalize не поддерживается",
+            "non-static method cannot be called from static context": "нестатический метод нельзя вызывать из статического контекста",
+            "final variable cannot be assigned": "нельзя изменять final-поле",
+            "private method is not accessible from another class": "private-метод недоступен из другого класса",
+            "class must implement all interface methods": "класс должен реализовать все методы интерфейса",
+            "interface cannot be used as extends class": "интерфейс нельзя использовать в extends как класс",
+            "imported type was not found": "импортируемый тип не найден",
+            "scanner object must be closed": "объект Scanner должен быть закрыт методом close",
+            "array index is out of bounds": "индекс массива выходит за допустимые границы",
         }
         if message in simple:
             return simple[message]
@@ -461,3 +533,72 @@ class SemanticAnalyzer:
         if match := re.fullmatch(r"type '(.+)' already declared", message):
             return f"тип '{match.group(1)}' уже объявлен"
         return message
+
+    def _check_imports(self, unit: CompilationUnit) -> None:
+        allowed = {"java.util.Scanner", "java.util.*"}
+        for imported in unit.imports:
+            if imported not in allowed:
+                self._report(self._error("UndefinedType", "импортируемый тип не найден", 1, 1, None))
+
+    def _check_interface_implementation(self, decl: ClassDecl, interface: ClassInfo) -> None:
+        class_methods = self.classes[decl.name].methods
+        for method_name, signatures in interface.methods.items():
+            implemented = False
+            for signature in signatures:
+                for candidate in class_methods.get(method_name, []):
+                    if candidate.return_type == signature.return_type and candidate.parameters == signature.parameters:
+                        implemented = True
+                        break
+                if implemented:
+                    break
+            if not implemented:
+                self._report(self._error("MethodSignatureMismatch", "класс должен реализовать все методы интерфейса", decl.position.line, decl.position.column, decl.name))
+                return
+
+    def _check_final_assignment(self, target: Expr | None, scope: Scope, line: int, column: int) -> None:
+        name = None
+        if isinstance(target, NameExpr):
+            name = target.name
+        elif isinstance(target, MemberAccessExpr) and isinstance(target.target, ThisExpr):
+            name = target.member
+        if name and scope.is_final(name):
+            raise self._error("TypeMismatch", "нельзя изменять final-поле", line, column, self.current_class.name if self.current_class else None)
+
+    def _array_length_from_initializer(self, expr: Expr) -> Optional[int]:
+        if isinstance(expr, ArrayLiteralExpr):
+            return len(expr.elements)
+        if isinstance(expr, NewExpr) and expr.array_size is not None:
+            size = self._literal_int(expr.array_size)
+            return size if size is not None and size >= 0 else None
+        return None
+
+    def _check_array_bounds(self, expr: IndexExpr, scope: Scope) -> None:
+        if not isinstance(expr.target, NameExpr):
+            return
+        length = scope.lookup_array_length(expr.target.name)
+        index = self._literal_int(expr.index)
+        if length is None or index is None:
+            return
+        if index < 0 or index >= length:
+            raise self._error("ArrayIndexOutOfBounds", "", expr.position.line, expr.position.column, self.current_class.name if self.current_class else None)
+
+    def _literal_int(self, expr: Expr | None) -> Optional[int]:
+        if isinstance(expr, LiteralExpr) and expr.kind == "int":
+            return int(expr.value)
+        if isinstance(expr, UnaryExpr) and expr.operator == "-" and isinstance(expr.operand, LiteralExpr) and expr.operand.kind == "int":
+            return -int(expr.operand.value)
+        return None
+
+    def _check_scanners_closed(self) -> None:
+        for scanner, position in self.current_scanners.items():
+            if scanner not in self.closed_scanners:
+                raise self._error("ScannerNotClosed", "", position.line, position.column, self.current_class.name if self.current_class else None)
+
+    def _try(self, action) -> None:
+        try:
+            action()
+        except TranslationError as exc:
+            self._report(exc)
+
+    def _report(self, error: TranslationError) -> None:
+        self.diagnostics.append(error.diagnostic)
